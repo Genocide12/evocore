@@ -361,6 +361,9 @@ class EvolutionEngine:
         self.best_speed: float = 0.0
         self.best_genome: dict = dict(NAIVE_GENOME)
         self.started_at: str = now_iso()
+        # данные арены: последний заезд + журнал победителей (для коэффициентов)
+        self.last_race: dict = None
+        self.race_log: list = []
 
     # -------- служебное --------
 
@@ -401,6 +404,12 @@ class EvolutionEngine:
                 self.best_genome = dict(bg)
             self.stagnation = int(st.get("stagnation", 0))
             self.generation = int(st.get("generation", 0))
+            lr = st.get("last_race")
+            if isinstance(lr, dict):
+                self.last_race = lr
+            rl = st.get("race_log")
+            if isinstance(rl, list):
+                self.race_log = rl[-60:]
         except Exception:
             pass
 
@@ -465,6 +474,8 @@ class EvolutionEngine:
             "stagnation": self.stagnation,
             "history": self.history[-1000:],
             "events": self.events[-300:],
+            "last_race": self.last_race,
+            "race_log": self.race_log[-60:],
             "started_at": self.started_at,
             "updated_at": now_iso(),
         }
@@ -616,6 +627,29 @@ class EvolutionEngine:
                 if bad and gen % 3 == 0:
                     b = bad[0]
                     self.log("warn", "Отбраковано %d мутантов (напр. %s: %s)" % (len(bad), describe(b["genome"]), b["error"]))
+
+                # --- арена: реальные результаты поколения как заезд ---
+                entries = []
+                for idx, e in enumerate(evaluated):
+                    g = e["genome"]
+                    entries.append({
+                        "id": "g%03d-%02d" % (gen, idx),
+                        "label": describe(g),
+                        "family": g.get("strategy", "naive"),
+                        "ok": bool(e["ok"]),
+                        "speed": round(e["speed"], 1) if e["ok"] else 0.0,
+                        "rank": None,
+                        "error": None if e["ok"] else e.get("error"),
+                    })
+                rank_of = {}
+                for r_i, e in enumerate(ok):
+                    for j, e0 in enumerate(evaluated):
+                        if e0 is e:
+                            rank_of[j] = r_i + 1
+                            break
+                for j, ent in enumerate(entries):
+                    ent["rank"] = rank_of.get(j)
+
                 champion = ok[0] if ok else None
                 updated = False
                 if champion is not None:
@@ -654,6 +688,22 @@ class EvolutionEngine:
                 )
                 if len(self.history) > 1000:
                     self.history = self.history[-1000:]
+                # итог заезда для арены
+                self.last_race = {
+                    "generation": gen,
+                    "entries": entries,
+                    "winner": (
+                        {"label": describe(champion["genome"]), "family": champion["genome"].get("strategy", "naive"), "speed": round(champion["speed"], 1)}
+                        if champion is not None
+                        else None
+                    ),
+                    "install": updated,
+                }
+                if updated and champion is not None:
+                    self.last_race["install_to"] = describe(self.installed_genome)
+                self.race_log.append({"generation": gen, "winner": (champion["genome"].get("strategy", "naive") if champion is not None else None), "install": updated})
+                if len(self.race_log) > 60:
+                    self.race_log = self.race_log[-60:]
                 mark = "  ==> UPDATE (install)" if updated else ""
                 self.log(
                     "gen",

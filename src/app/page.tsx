@@ -1,16 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  ChevronsRight,
   Code2,
+  Coins,
   Dna,
+  Dices,
   Gauge,
   Play,
   RotateCcw,
   ScrollText,
   Square,
   TrendingUp,
+  Zap,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -26,650 +30,599 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
+import RaceCanvas from "@/components/arena/race-canvas";
+import BetPanel from "@/components/arena/bet-panel";
+import {
+  computeOdds,
+  familyMeta,
+  fmtSpeed,
+  levelInfo,
+  loadBets,
+  loadCoins,
+  MIN_STAKE,
+  saveBets,
+  saveCoins,
+  STARTING_COINS,
+  type ArenaState,
+  type BetRecord,
+  type RaceResult,
+} from "@/lib/arena";
 
-interface EvolutionEvent {
-  time: string;
-  type: "gen" | "install" | "info" | "warn" | "error";
-  msg: string;
-}
+const POP_OPTIONS = [8, 12, 16, 24, 32];
+const GEN_OPTIONS = [20, 50, 100, 200, 500];
 
-interface HistoryPoint {
-  generation: number;
-  best: number;
-  own: number;
-  speedup: number;
-  improved: boolean;
-  champion: string;
-  stagnation: number;
-}
-
-interface EvolutionState {
-  running: boolean;
-  generation: number;
-  max_generations: number;
-  population: number;
-  installed_genome: { strategy: string; params: Record<string, unknown> };
-  installed_code: string;
-  installed_speed: number;
-  baseline_speed: number;
-  speedup: number;
-  best_speed: number;
-  best_genome: { strategy: string; params: Record<string, unknown> };
-  stagnation: number;
-  history: HistoryPoint[];
-  events: EvolutionEvent[];
-  started_at: string;
-  updated_at: string;
-}
-
-interface StatusResponse {
-  ok: boolean;
-  running: boolean;
-  state: EvolutionState | null;
-  error?: string;
-}
-
-interface ChartDatum {
-  gen: number;
-  best: number;
-  own: number;
-  speedup: number;
-  improved: boolean;
-}
-
-const fmtM = (v: number | undefined | null): string =>
-  typeof v === "number" && isFinite(v) ? (v / 1e6).toFixed(2) + "M" : "—";
-
-function InstallDot(props: { cx?: number; cy?: number; payload?: ChartDatum }) {
-  const { cx, cy, payload } = props;
-  if (typeof cx !== "number" || typeof cy !== "number" || !payload?.improved) {
-    return <g />;
-  }
-  return (
-    <circle cx={cx} cy={cy} r={4} fill="#10b981" stroke="#022c22" strokeWidth={1.5} />
-  );
-}
-
-function describeGenome(g: { strategy: string; params: Record<string, unknown> } | undefined): string {
-  if (!g) return "—";
-  const bits = Object.entries(g.params || {}).map(([k, v]) => {
-    if (typeof v === "boolean") return `${k}=${v ? "on" : "off"}`;
-    return `${k}=${String(v)}`;
-  });
-  return g.strategy + (bits.length ? " {" + bits.join(", ") + "}" : " {}");
-}
-
-const EVENT_STYLE: Record<string, string> = {
-  install: "border-l-emerald-500 text-emerald-200",
-  gen: "border-l-zinc-600 text-zinc-400",
-  info: "border-l-zinc-700 text-zinc-400",
-  warn: "border-l-amber-500 text-amber-200",
-  error: "border-l-red-500 text-red-200",
+const LOG_COLORS: Record<string, string> = {
+  install: "text-amber-300",
+  gen: "text-zinc-400",
+  info: "text-emerald-300",
+  warn: "text-rose-300",
+  error: "text-red-400",
 };
 
 export default function Home() {
+  const [st, setSt] = useState<ArenaState | null>(null);
+  const [running, setRunning] = useState(false);
+  const [population, setPopulation] = useState(16);
+  const [generations, setGenerations] = useState(50);
+  const [busy, setBusy] = useState(false);
+  const [queue, setQueue] = useState<RaceResult[]>([]);
+  const [currentRace, setCurrentRace] = useState<RaceResult | null>(null);
+  const [coins, setCoins] = useState(STARTING_COINS);
+  const [pending, setPending] = useState<BetRecord | null>(null);
+  const [betHistory, setBetHistory] = useState<BetRecord[]>([]);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [showFullCode, setShowFullCode] = useState(false);
+  const [installBanner, setInstallBanner] = useState<string | null>(null);
+  const [rescues, setRescues] = useState(0);
+  const lastRaceGenRef = useRef(0);
+  const coinsRef = useRef(coins);
+  const pendingRef = useRef(pending);
+  coinsRef.current = coins;
+  pendingRef.current = pending;
   const { toast } = useToast();
-  const [data, setData] = useState<StatusResponse | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [cfgGenerations, setCfgGenerations] = useState(50);
-  const [cfgPopulation, setCfgPopulation] = useState(16);
-  const aliveRef = useRef(true);
 
+  useEffect(() => {
+    setCoins(loadCoins());
+    setBetHistory(loadBets());
+  }, []);
+
+  const odds = useMemo(() => computeOdds(st?.race_log), [st?.race_log]);
+  const speedup = st?.speedup ?? 1;
+  const lvl = levelInfo(speedup);
+  const raceNo = st?.race_log?.length ?? 0;
+
+  // ------------------------- опрос состояния движка -------------------------
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch("/api/evolution/status", { cache: "no-store" });
-      const json: StatusResponse = await res.json();
-      if (aliveRef.current) setData(json);
+      const data = (await res.json()) as {
+        ok: boolean;
+        running: boolean;
+        state: ArenaState | null;
+      };
+      setRunning(data.running);
+      setSt(data.state);
+      const lr = data.state?.last_race;
+      if (lr && lr.generation > lastRaceGenRef.current) {
+        lastRaceGenRef.current = lr.generation;
+        setQueue((q) => [...q, lr].slice(-6));
+        // расчёт ставки по реальному результату заезда
+        const p = pendingRef.current;
+        if (p && lr.winner) {
+          const win = lr.winner.family === p.family;
+          const payout = win ? Math.round(p.stake * p.odds) : 0;
+          setCoins((c) => {
+            const nc = c + payout;
+            saveCoins(nc);
+            return nc;
+          });
+          const rec: BetRecord = { ...p, win };
+          setBetHistory((h) => {
+            const nh = [...h, rec].slice(-8);
+            saveBets(nh);
+            return nh;
+          });
+          setPending(null);
+          if (win) {
+            toast({
+              title: `Ставка сыграла: +${Math.round(p.stake * p.odds) - p.stake} монет`,
+              description: `${familyMeta(p.family).name} победили в заезде #${lr.generation}`,
+            });
+          } else {
+            toast({
+              title: `Мимо: −${p.stake} монет`,
+              description: `В заезде #${lr.generation} победили ${familyMeta(lr.winner.family).name}`,
+              variant: "destructive",
+            });
+          }
+        }
+        if (lr.install) {
+          setInstallBanner(
+            `ГЕНОМ ОБНОВЛЁН${lr.install_to ? ` → ${lr.install_to}` : ""} — организм стал быстрее`
+          );
+          window.setTimeout(() => setInstallBanner(null), 5000);
+        }
+      }
     } catch {
-      /* сеть могла мигнуть — следующий тик повторит */
+      /* сеть моргнула — попробуем на следующем тике */
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
-    aliveRef.current = true;
     fetchStatus();
     const id = setInterval(fetchStatus, 1500);
-    return () => {
-      aliveRef.current = false;
-      clearInterval(id);
-    };
+    return () => clearInterval(id);
   }, [fetchStatus]);
 
-  const doAction = useCallback(
+  // ------------------------------ насос очереди ------------------------------
+  useEffect(() => {
+    if (!currentRace && queue.length > 0) {
+      const [next, ...rest] = queue;
+      setCurrentRace(next);
+      setQueue(rest);
+    }
+  }, [currentRace, queue]);
+
+  // -------------------------------- действия --------------------------------
+  const control = useCallback(
     async (action: "start" | "stop" | "reset") => {
-      if (action === "reset") {
-        const ok = window.confirm(
-          "Сбросить организм к наивной версии? История эволюции будет очищена.\nReset organism to naive baseline? Evolution history will be cleared."
-        );
-        if (!ok) return;
-      }
-      setBusy(action);
+      setBusy(true);
       try {
         const res = await fetch("/api/evolution/control", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action,
-            generations: cfgGenerations,
-            population: cfgPopulation,
+            generations,
+            population,
           }),
         });
-        const json: { ok: boolean; error?: string; state: EvolutionState | null } =
-          await res.json();
-        if (!json.ok) {
-          toast({
-            title: "Ошибка / Error",
-            description: json.error ?? "Неизвестная ошибка",
-            variant: "destructive",
-          });
+        const data = await res.json();
+        if (!data.ok) {
+          toast({ title: "Ошибка", description: String(data.error), variant: "destructive" });
+        } else if (action === "start") {
+          toast({ title: "Арена открыта!", description: "Мутанты выходят на трек" });
         } else if (action === "reset") {
-          toast({
-            title: "Сброс выполнен / Reset done",
-            description: "Организм возвращён к naive baseline",
-          });
+          lastRaceGenRef.current = 0;
+          setQueue([]);
+          setCurrentRace(null);
+          setSt(null);
+          toast({ title: "Организм сброшен", description: "Геном возвращён к наивной версии" });
         }
         await fetchStatus();
-      } catch (e) {
-        toast({
-          title: "Сеть недоступна / Network error",
-          description: String(e),
-          variant: "destructive",
-        });
       } finally {
-        setBusy(null);
+        setBusy(false);
       }
     },
-    [cfgGenerations, cfgPopulation, fetchStatus, toast]
+    [fetchStatus, generations, population, toast]
   );
 
-  const state = data?.state ?? null;
-  const running = data?.running ?? false;
-  const chartData: ChartDatum[] = (state?.history ?? []).map((h) => ({
-    gen: h.generation,
-    best: +(h.best / 1e6).toFixed(3),
-    own: +(h.own / 1e6).toFixed(3),
-    speedup: h.speedup,
-    improved: h.improved,
-  }));
-  const events = state ? [...state.events].reverse() : [];
-  const genPct =
-    state && state.max_generations > 0
-      ? Math.min(100, (state.generation / state.max_generations) * 100)
-      : 0;
+  const placeBet = useCallback(
+    (family: string, stake: number) => {
+      if (stake < MIN_STAKE || stake > coinsRef.current || pendingRef.current) return;
+      setCoins((c) => {
+        const nc = c - stake;
+        saveCoins(nc);
+        return nc;
+      });
+      const rec: BetRecord = {
+        generation: (st?.generation ?? 0) + 1,
+        family,
+        stake,
+        odds: odds[family] ?? 2,
+        win: null,
+      };
+      setPending(rec);
+      toast({
+        title: `Ставка: ${stake} монет на «${familyMeta(family).name}»`,
+        description: `Коэффициент ×${rec.odds.toFixed(1)} · возможный выигрыш ${Math.round(stake * rec.odds)}`,
+      });
+    },
+    [odds, st?.generation, toast]
+  );
+
+  const rescue = useCallback(() => {
+    setCoins((c) => {
+      const nc = c + 100;
+      saveCoins(nc);
+      return nc;
+    });
+    setRescues((r) => r + 1);
+    toast({ title: "Спонсор биолаборатории ввёл +100 монет", description: "Тратить с умом!" });
+  }, [toast]);
+
+  const canStart = !running && !busy;
+
+  // -------------------------------- разметка --------------------------------
+  const events = st?.events ?? [];
+  const doa = currentRace?.entries.filter((e) => !e.ok).length ?? 0;
 
   return (
-    <div className="flex min-h-screen flex-col bg-zinc-950 text-zinc-100">
-      {/* ---------- Header ---------- */}
-      <header className="border-b border-zinc-800/80 bg-zinc-950/80">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-start gap-3">
-            <div className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 ring-1 ring-emerald-500/30">
-              <Dna className="h-5 w-5 text-emerald-400" aria-hidden="true" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
-                EvoCore{" "}
-                <span className="text-zinc-500">· саморазвивающаяся программа</span>
-              </h1>
-              <p className="mt-1 max-w-2xl text-sm text-zinc-400">
-                Генетический алгоритм эволюционирует собственный код: популяция
-                мутантов проходит тесты и бенчмарк, чемпион перезаписывает файл{" "}
-                <code className="rounded bg-zinc-900 px-1 py-0.5 font-mono text-xs text-emerald-300">
-                  genome_core.py
-                </code>{" "}
-                — и программа живёт дальше уже на нём.
-              </p>
-            </div>
+    <div className="flex min-h-screen flex-col bg-[radial-gradient(ellipse_at_top,#1a1a2e_0%,#09090b_55%)] text-zinc-100">
+      {/* ------------------------------- шапка ------------------------------- */}
+      <header className="sticky top-0 z-20 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 ring-1 ring-emerald-500/40">
+            <Dna className="h-5 w-5 text-emerald-400" />
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {running ? (
-              <Badge
-                variant="outline"
-                className="gap-2 border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-emerald-300"
-              >
-                <span className="relative flex h-2.5 w-2.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
-                </span>
-                Эволюция идёт / Running
-              </Badge>
-            ) : state ? (
-              <Badge
-                variant="outline"
-                className="gap-2 border-zinc-600 bg-zinc-900 px-3 py-1.5 text-zinc-300"
-              >
-                <span className="h-2.5 w-2.5 rounded-full bg-zinc-500" />
-                Остановлена / Stopped
-              </Badge>
-            ) : (
-              <Badge
-                variant="outline"
-                className="gap-2 border-zinc-700 bg-zinc-900 px-3 py-1.5 text-zinc-400"
-              >
-                <span className="h-2.5 w-2.5 rounded-full bg-zinc-700" />
-                Не запускалась / Idle
-              </Badge>
-            )}
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-lg font-black leading-tight tracking-tight">
+              EvoCore <span className="text-amber-400">ARENA</span>
+            </h1>
+            <p className="hidden truncate text-[11px] text-zinc-500 sm:block">
+              саморазвивающаяся программа · мутанты гоняются реальным кодом
+            </p>
           </div>
+          <Badge
+            variant="outline"
+            className={
+              running
+                ? "animate-pulse border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
+                : "border-zinc-700 text-zinc-500"
+            }
+          >
+            {running ? "LIVE" : "офлайн"}
+          </Badge>
+          <Badge variant="outline" className="hidden border-violet-500/50 bg-violet-500/10 text-violet-300 sm:inline-flex">
+            <Zap className="mr-1 h-3 w-3" />
+            {lvl.title}
+          </Badge>
+          <span
+            key={coins}
+            className="flex animate-in fade-in zoom-in-50 items-center gap-1.5 rounded-full border border-amber-500/50 bg-amber-500/10 px-3 py-1 font-mono text-sm font-bold text-amber-300 duration-300"
+          >
+            <Coins className="h-4 w-4" />
+            {coins}
+            {rescues > 0 && <span className="text-[10px] text-amber-500/70">+{rescues * 100}</span>}
+          </span>
         </div>
       </header>
 
-      {/* ---------- Main ---------- */}
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
-        {/* Controls */}
-        <section aria-label="Управление эволюцией" className="mb-6">
-          <div className="flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 sm:flex-row sm:items-end sm:justify-between">
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="flex flex-col gap-1">
-                <label htmlFor="cfg-pop" className="text-xs text-zinc-500">
-                  Популяция / Population
-                </label>
+      <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 px-4 py-4">
+        {/* ------------------------- карточки статистики ------------------------- */}
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Card className="border-zinc-800 bg-zinc-900/60">
+            <CardHeader className="pb-1">
+              <CardTitle className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+                <Activity className="h-3.5 w-3.5" /> Заезд / поколение
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="font-mono text-2xl font-bold">
+                {st?.generation ?? 0}
+                <span className="text-sm text-zinc-600">/{st?.max_generations ?? "—"}</span>
+              </div>
+              <Progress value={st ? (st.generation / Math.max(1, st.max_generations)) * 100 : 0} className="mt-2 h-1.5" />
+            </CardContent>
+          </Card>
+          <Card className="border-zinc-800 bg-zinc-900/60">
+            <CardHeader className="pb-1">
+              <CardTitle className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+                <TrendingUp className="h-3.5 w-3.5" /> Лучший мутант
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="font-mono text-2xl font-bold text-emerald-300">
+                {fmtSpeed(st?.best_speed ?? 0)}
+              </div>
+              <div className="truncate font-mono text-[11px] text-zinc-500">
+                {st?.best_genome?.strategy ? familyMeta(st.best_genome.strategy).name : "—"}
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="border-amber-500/25 bg-gradient-to-br from-amber-500/10 to-zinc-900/60">
+            <CardHeader className="pb-1">
+              <CardTitle className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-amber-500/80">
+                <Zap className="h-3.5 w-3.5" /> Сила организма
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="font-mono text-3xl font-black text-amber-300 drop-shadow-[0_0_12px_rgba(251,191,36,0.35)]">
+                ×{(speedup ?? 1).toFixed(2)}
+              </div>
+              <div className="mt-1 text-[11px] text-zinc-500">
+                {lvl.title}
+                {lvl.next ? ` → ${lvl.next.title} в ×${lvl.next.minSpeedup}` : " — предел пройден"}
+              </div>
+              <Progress value={lvl.progress} className="mt-1.5 h-1.5" />
+            </CardContent>
+          </Card>
+          <Card className="border-zinc-800 bg-zinc-900/60">
+            <CardHeader className="pb-1">
+              <CardTitle className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+                <Gauge className="h-3.5 w-3.5" /> Метаболизм
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="font-mono text-2xl font-bold text-violet-300">
+                {fmtSpeed(st?.installed_speed ?? 0)}
+              </div>
+              <div className="text-[11px] text-zinc-500">
+                {st && st.stagnation >= 8 ? (
+                  <span className="text-rose-300">режим иммиграции</span>
+                ) : (
+                  <>elem/s · текущий код живёт</>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* --------------------------- арена + ставки --------------------------- */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <Card className="relative overflow-hidden border-zinc-800 bg-zinc-900/60 lg:col-span-2">
+            {installBanner && (
+              <div className="absolute inset-x-0 top-0 z-10 animate-in fade-in slide-in-from-top-2 bg-amber-400 py-1.5 text-center text-sm font-black text-zinc-950 duration-300">
+                {installBanner}
+              </div>
+            )}
+            <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Dices className="h-4 w-4 text-violet-400" />
+                Трек эволюции
+                {doa > 0 && (
+                  <Badge variant="outline" className="border-rose-500/40 text-rose-300">
+                    гейт забраковал: {doa}
+                  </Badge>
+                )}
+              </CardTitle>
+              <span className="font-mono text-[11px] text-zinc-500">
+                заездов в истории: {raceNo}
+                {queue.length > 0 && ` · в очереди: ${queue.length}`}
+              </span>
+            </CardHeader>
+            <CardContent>
+              <RaceCanvas
+                race={currentRace}
+                running={running}
+                onDone={() => setCurrentRace(null)}
+                onStart={() => canStart && control("start")}
+                pendingFamily={pending?.family ?? null}
+              />
+              {/* пульт управления */}
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-3">
                 <select
-                  id="cfg-pop"
-                  value={cfgPopulation}
-                  disabled={running || busy !== null}
-                  onChange={(e) => setCfgPopulation(Number(e.target.value))}
-                  className="h-9 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-200 outline-none focus:ring-1 focus:ring-emerald-500 disabled:opacity-50"
+                  value={population}
+                  onChange={(e) => setPopulation(Number(e.target.value))}
+                  disabled={running || busy}
+                  className="h-9 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-300 disabled:opacity-50"
+                  aria-label="Размер популяции"
                 >
-                  {[8, 12, 16, 24, 32].map((v) => (
-                    <option key={v} value={v}>
-                      {v} особей
+                  {POP_OPTIONS.map((p) => (
+                    <option key={p} value={p}>
+                      {p} мутантов
                     </option>
                   ))}
                 </select>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label htmlFor="cfg-gen" className="text-xs text-zinc-500">
-                  Поколений / Max generations
-                </label>
                 <select
-                  id="cfg-gen"
-                  value={cfgGenerations}
-                  disabled={running || busy !== null}
-                  onChange={(e) => setCfgGenerations(Number(e.target.value))}
-                  className="h-9 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-200 outline-none focus:ring-1 focus:ring-emerald-500 disabled:opacity-50"
+                  value={generations}
+                  onChange={(e) => setGenerations(Number(e.target.value))}
+                  disabled={running || busy}
+                  className="h-9 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-300 disabled:opacity-50"
+                  aria-label="Поколений"
                 >
-                  {[10, 25, 50, 100].map((v) => (
-                    <option key={v} value={v}>
-                      {v}
+                  {GEN_OPTIONS.map((g) => (
+                    <option key={g} value={g}>
+                      {g} заездов
                     </option>
                   ))}
                 </select>
+                <div className="flex-1" />
+                {running ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => control("stop")}
+                    disabled={busy}
+                    className="border-rose-500/50 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+                  >
+                    <Square className="mr-1.5 h-4 w-4" /> Стоп
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => control("start")}
+                    disabled={!canStart}
+                    className="bg-emerald-500 font-bold text-zinc-950 hover:bg-emerald-400"
+                  >
+                    <Play className="mr-1.5 h-4 w-4" /> Старт эволюции
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  onClick={() => setResetOpen(true)}
+                  disabled={busy}
+                  className="border-zinc-700 text-zinc-400 hover:text-zinc-200"
+                >
+                  <RotateCcw className="mr-1.5 h-4 w-4" /> Сброс
+                </Button>
               </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
+            </CardContent>
+          </Card>
+
+          <BetPanel
+            coins={coins}
+            odds={odds}
+            pending={pending}
+            betHistory={betHistory}
+            lastRace={st?.last_race ?? null}
+            onBet={placeBet}
+            onRescue={rescue}
+          />
+        </div>
+
+        {/* ------------------------ код + журнал + график ------------------------ */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card className="border-zinc-800 bg-zinc-900/60">
+            <CardHeader className="flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Code2 className="h-4 w-4 text-emerald-400" />
+                Код организма
+                <Badge variant="outline" className="font-mono text-[10px] text-zinc-500">
+                  evolution/genome_core.py
+                </Badge>
+              </CardTitle>
               <Button
-                onClick={() => doAction("start")}
-                disabled={running || busy !== null}
-                className="min-h-11 bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowFullCode((v) => !v)}
+                className="h-7 text-xs text-zinc-500"
               >
-                {busy === "start" ? (
-                  <Activity className="mr-2 h-4 w-4 animate-pulse" />
-                ) : (
-                  <Play className="mr-2 h-4 w-4" />
-                )}
-                Старт эволюции
+                {showFullCode ? "свернуть" : "весь код"}
+                <ChevronsRight className="ml-1 h-3 w-3" />
               </Button>
-              <Button
-                onClick={() => doAction("stop")}
-                disabled={!running || busy !== null}
-                variant="outline"
-                className="min-h-11 border-zinc-700 bg-transparent text-zinc-200 hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                {busy === "stop" ? (
-                  <Activity className="mr-2 h-4 w-4 animate-pulse" />
-                ) : (
-                  <Square className="mr-2 h-4 w-4" />
-                )}
-                Стоп
-              </Button>
-              <Button
-                onClick={() => doAction("reset")}
-                disabled={busy !== null}
-                variant="outline"
-                className="min-h-11 border-amber-500/40 bg-transparent text-amber-400 hover:bg-amber-500/10 hover:text-amber-300"
-              >
-                {busy === "reset" ? (
-                  <Activity className="mr-2 h-4 w-4 animate-pulse" />
-                ) : (
-                  <RotateCcw className="mr-2 h-4 w-4" />
-                )}
-                Сброс к naive
-              </Button>
-            </div>
-          </div>
-        </section>
-
-        {/* Stats */}
-        <section aria-label="Метрики организма" className="mb-6">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-                  <Dna className="h-3.5 w-3.5" aria-hidden="true" />
-                  Поколение / Generation
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-semibold text-zinc-100">
-                  {state ? state.generation : "—"}
-                  {state ? (
-                    <span className="text-sm text-zinc-500"> / {state.max_generations}</span>
-                  ) : null}
+            </CardHeader>
+            <CardContent>
+              <div className={showFullCode ? "" : "max-h-64 overflow-hidden"}>
+                <div className={showFullCode ? "" : "max-h-64 overflow-y-auto"}>
+                  <SyntaxHighlighter
+                    language="python"
+                    style={oneDark}
+                    customStyle={{
+                      margin: 0,
+                      background: "#0c0c0f",
+                      fontSize: 12,
+                      borderRadius: 8,
+                    }}
+                    wrapLongLines={false}
+                  >
+                    {st?.installed_code || "# организм ещё не запускался — нажми «Старт эволюции»"}
+                  </SyntaxHighlighter>
                 </div>
-                <Progress
-                  value={genPct}
-                  className="mt-3 h-1.5 bg-zinc-800 [&>div]:bg-emerald-500"
-                  aria-label="Прогресс поколений"
-                />
-              </CardContent>
-            </Card>
-
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-                  <TrendingUp className="h-3.5 w-3.5" aria-hidden="true" />
-                  Лучший fitness
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-semibold text-emerald-400">
-                  {fmtM(state?.best_speed)}
-                  <span className="ml-1 text-xs text-zinc-500">elem/s</span>
-                </div>
-                <p className="mt-2 truncate text-xs text-zinc-500">
-                  чемпион:{" "}
-                  <span className="font-mono text-zinc-400">
-                    {state ? describeGenome(state.best_genome) : "—"}
-                  </span>
+              </div>
+              {!showFullCode && (
+                <p className="mt-1 text-right text-[10px] text-zinc-600">
+                  этот файл программа перезаписывает себе сама
                 </p>
-              </CardContent>
-            </Card>
+              )}
+            </CardContent>
+          </Card>
 
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-                  <Gauge className="h-3.5 w-3.5" aria-hidden="true" />
-                  Ускорение / Speedup
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-semibold text-amber-400">
-                  ×{state && state.speedup ? state.speedup.toFixed(2) : "—"}
-                </div>
-                <p className="mt-2 truncate text-xs text-zinc-500">
-                  к baseline{" "}
-                  <span className="font-mono text-zinc-400">
-                    {fmtM(state?.baseline_speed)} elem/s
-                  </span>
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-                  <Activity className="h-3.5 w-3.5" aria-hidden="true" />
-                  Метаболизм / Metabolism
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-2xl font-semibold text-zinc-100">
-                  {fmtM(state?.installed_speed)}
-                  <span className="ml-1 text-xs text-zinc-500">elem/s</span>
-                </div>
-                <p className="mt-2 text-xs">
-                  {state && state.stagnation >= 3 ? (
-                    <span className={state.stagnation >= 8 ? "text-amber-400" : "text-zinc-500"}>
-                      стагнация: {state.stagnation} покол.
-                      {state.stagnation >= 8 ? " · иммиграция" : ""}
-                    </span>
-                  ) : (
-                    <span className="text-zinc-500">
-                      код живой, исполняется каждый цикл
-                    </span>
-                  )}
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-        </section>
-
-        {/* Chart + organism info */}
-        <section aria-label="История fitness" className="mb-6">
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <Card className="border-zinc-800 bg-zinc-900/40 lg:col-span-2">
-              <CardHeader className="pb-0">
-                <CardTitle className="text-sm font-medium text-zinc-300">
-                  Fitness по поколениям · M elem/s
-                  <span className="ml-2 text-xs font-normal text-zinc-500">
-                    зелёная точка = install (код переписан)
-                  </span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-4">
-                {chartData.length > 0 ? (
-                  <div className="h-72 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={chartData} margin={{ top: 6, right: 8, bottom: 0, left: -12 }}>
-                        <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
-                        <XAxis
-                          dataKey="gen"
-                          stroke="#71717a"
-                          fontSize={11}
-                          tickLine={false}
-                          axisLine={{ stroke: "#3f3f46" }}
-                        />
-                        <YAxis
-                          yAxisId="left"
-                          stroke="#71717a"
-                          fontSize={11}
-                          tickLine={false}
-                          axisLine={{ stroke: "#3f3f46" }}
-                          tickFormatter={(v: number) => v.toFixed(1)}
-                        />
-                        <YAxis
-                          yAxisId="right"
-                          orientation="right"
-                          stroke="#a16207"
-                          fontSize={11}
-                          tickLine={false}
-                          axisLine={false}
-                          tickFormatter={(v: number) => "×" + v.toFixed(1)}
-                        />
-                        <Tooltip
-                          contentStyle={{
-                            background: "#18181b",
-                            border: "1px solid #3f3f46",
-                            borderRadius: 8,
-                            fontSize: 12,
-                          }}
-                          labelStyle={{ color: "#a1a1aa" }}
-                          formatter={(value) => [String(Number(value).toFixed(2)), ""]}
-                        />
-                        <Legend
-                          wrapperStyle={{ fontSize: 12 }}
-                          formatter={(value) => <span style={{ color: "#d4d4d8" }}>{value}</span>}
-                        />
-                        <Line
-                          yAxisId="left"
-                          type="monotone"
-                          dataKey="best"
-                          name="Лучший fitness"
-                          stroke="#10b981"
-                          strokeWidth={2}
-                          dot={<InstallDot />}
-                          activeDot={{ r: 4 }}
-                        />
-                        <Line
-                          yAxisId="left"
-                          type="monotone"
-                          dataKey="own"
-                          name="Организм (metabolism)"
-                          stroke="#a1a1aa"
-                          strokeWidth={1.5}
-                          dot={false}
-                        />
-                        <Line
-                          yAxisId="right"
-                          type="monotone"
-                          dataKey="speedup"
-                          name="Speedup ×"
-                          stroke="#f59e0b"
-                          strokeWidth={1.5}
-                          strokeDasharray="4 3"
-                          dot={false}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                ) : (
-                  <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-zinc-800 text-sm text-zinc-600">
-                    Нет данных — запустите эволюцию / No data — press Start
-                  </div>
+          <Card className="border-zinc-800 bg-zinc-900/60">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <ScrollText className="h-4 w-4 text-zinc-400" />
+                Журнал арены
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="max-h-64 space-y-0.5 overflow-y-auto rounded-lg bg-zinc-950/70 p-3 font-mono text-[11px] leading-relaxed">
+                {events.length === 0 && (
+                  <p className="text-zinc-600">событий пока нет — арена ждёт старта</p>
                 )}
-              </CardContent>
-            </Card>
-
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-zinc-300">
-                  Текущий геном / Installed genome
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {state ? (
-                  <>
-                    <div className="rounded-lg bg-zinc-900 p-3 ring-1 ring-zinc-800">
-                      <div className="font-mono text-base text-emerald-300">
-                        {describeGenome(state.installed_genome)}
-                      </div>
-                      <div className="mt-1 text-xs text-zinc-500">
-                        стратегия «горячего кода» организма
-                      </div>
-                    </div>
-                    <dl className="space-y-2 text-sm">
-                      <div className="flex items-center justify-between gap-2">
-                        <dt className="text-zinc-500">Популяция</dt>
-                        <dd className="font-mono text-zinc-200">{state.population}</dd>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <dt className="text-zinc-500">Baseline (naive)</dt>
-                        <dd className="font-mono text-zinc-200">{fmtM(state.baseline_speed)}</dd>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <dt className="text-zinc-500">Обновлён</dt>
-                        <dd className="font-mono text-zinc-200">
-                          {state.updated_at
-                            ? new Date(state.updated_at).toLocaleTimeString("ru-RU")
-                            : "—"}
-                        </dd>
-                      </div>
-                    </dl>
-                    <p className="text-xs leading-relaxed text-zinc-500">
-                      Метаболизм — это не метрика для красоты: движок реально
-                      исполняет эту функцию каждый generation, и её скорость
-                      меняется после каждого install улучшенного кода.
+                {events
+                  .slice()
+                  .reverse()
+                  .slice(0, 40)
+                  .map((e, i) => (
+                    <p key={i} className={LOG_COLORS[e.type] ?? "text-zinc-400"}>
+                      <span className="text-zinc-600">[{e.time}]</span> {e.msg}
                     </p>
-                  </>
-                ) : (
-                  <div className="flex h-56 items-center justify-center rounded-lg border border-dashed border-zinc-800 px-4 text-center text-sm text-zinc-600">
-                    Организм ещё не создан. Нажмите «Старт эволюции» — популяция
-                    мутантов начнёт rivalry за место в genome_core.py.
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </section>
+                  ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
 
-        {/* Code + log */}
-        <section aria-label="Код организма и журнал">
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-zinc-300">
-                  <Code2 className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                  Код организма / Organism code
-                  <code className="ml-auto rounded bg-zinc-900 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">
-                    evolution/genome_core.py
-                  </code>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {state?.installed_code ? (
-                  <div className="max-h-[420px] overflow-y-auto rounded-lg bg-[#0d1117] ring-1 ring-zinc-800">
-                    <SyntaxHighlighter
-                      language="python"
-                      style={oneDark}
-                      showLineNumbers
-                      customStyle={{
-                        background: "transparent",
-                        margin: 0,
-                        padding: "1rem",
-                        fontSize: "0.78rem",
-                        lineHeight: 1.55,
-                      }}
-                    >
-                      {state.installed_code}
-                    </SyntaxHighlighter>
-                  </div>
-                ) : (
-                  <div className="flex h-56 items-center justify-center rounded-lg border border-dashed border-zinc-800 text-sm text-zinc-600">
-                    Файл genome_core.py пуст / not initialized
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="border-zinc-800 bg-zinc-900/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm font-medium text-zinc-300">
-                  <ScrollText className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                  Журнал эволюции / Evolution log
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {events.length > 0 ? (
-                  <div className="max-h-[420px] space-y-1.5 overflow-y-auto pr-1 [scrollbar-color:#3f3f46_transparent] [scrollbar-width:thin]">
-                    {events.map((e, i) => (
-                      <div
-                        key={`${e.time}-${i}`}
-                        className={`flex items-start gap-2 border-l-2 py-1 pl-2.5 text-xs leading-relaxed ${EVENT_STYLE[e.type] ?? EVENT_STYLE.info}`}
-                      >
-                        <span className="shrink-0 font-mono text-[10px] text-zinc-600">
-                          {e.time}
-                        </span>
-                        <span className={e.type === "gen" ? "font-mono" : ""}>{e.msg}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="flex h-56 items-center justify-center rounded-lg border border-dashed border-zinc-800 text-sm text-zinc-600">
-                    Журнал пуст — эволюция ещё не запускалась / Log is empty
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </section>
+        <Card className="border-zinc-800 bg-zinc-900/60">
+          <CardHeader className="pb-0">
+            <CardTitle className="text-base">Динамика силы организма</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="h-44">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={st?.history ?? []}>
+                  <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
+                  <XAxis dataKey="generation" stroke="#71717a" fontSize={11} />
+                  <YAxis stroke="#71717a" fontSize={11} width={54} tickFormatter={(v: number) => fmtSpeed(v)} />
+                  <Tooltip
+                    contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
+                    formatter={(value: number | string) => [fmtSpeed(Number(value)), ""]}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Line type="monotone" dataKey="best" name="Лучший мутант" stroke="#34d399" dot={false} strokeWidth={2} />
+                  <Line type="monotone" dataKey="own" name="Организм" stroke="#a78bfa" dot={false} strokeWidth={2} />
+                  <Line
+                    type="monotone"
+                    dataKey="speedup"
+                    name="Ускорение ×"
+                    stroke="#fbbf24"
+                    dot={
+                      ((p: {
+                        cx?: number;
+                        cy?: number;
+                        payload?: { improved?: boolean };
+                      }) =>
+                        p.payload?.improved && p.cx != null && p.cy != null ? (
+                          <circle
+                            key={`d-${p.cx}-${p.cy}`}
+                            cx={p.cx}
+                            cy={p.cy}
+                            r={3.5}
+                            fill="#fbbf24"
+                            stroke="#09090b"
+                            strokeWidth={1}
+                          />
+                        ) : null) as never
+                    }
+                    strokeWidth={1.5}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </CardContent>
+        </Card>
       </main>
 
-      {/* ---------- Footer ---------- */}
-      <footer className="mt-auto border-t border-zinc-800/80 bg-zinc-950">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-1 px-4 py-4 text-xs text-zinc-600 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-          <span>
-            EvoCore · саморазвитие честное: код компилируется, тестируется,
-            бенчмаркается и перезаписывается на диске
-          </span>
-          <span className="font-mono">
-            console: python3 evolution/evolution_core.py --generations 50
-          </span>
+      {/* ------------------------------- подвал ------------------------------- */}
+      <footer className="mt-auto border-t border-zinc-800/80 bg-zinc-950/80">
+        <div className="mx-auto max-w-7xl px-4 py-3 text-center text-[11px] text-zinc-600">
+          EvoCore ARENA — честная эволюция: скорость бегунов это реальный бенчмарк их кода (elem/s),
+          а чемпион заезда перезаписывает genome_core.py · консоль:{" "}
+          <code className="text-zinc-500">python3 evolution/evolution_core.py --generations 50</code>
         </div>
       </footer>
+
+      {/* --------------------------- диалог сброса --------------------------- */}
+      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+        <DialogContent className="border-zinc-800 bg-zinc-900">
+          <DialogHeader>
+            <DialogTitle>Сбросить организм к naive?</DialogTitle>
+            <DialogDescription>
+              Геном вернётся к наивной версии, история заездов и скорость обнулятся.
+              Ставки и монеты останутся у тебя.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResetOpen(false)} className="border-zinc-700">
+              Отмена
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setResetOpen(false);
+                control("reset");
+              }}
+            >
+              Сбросить
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
