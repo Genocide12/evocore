@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# next.js
+.next/
+out/
+build/
+
+# runtime state of the evolving organism
+evolution/state/
+evolution/genome_core.py.bak*
+
+# misc
+.DS_Store
+*.pem
+*.log
+dev.log
+server.log
+
+# env
+.env
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts

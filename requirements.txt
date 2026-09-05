@@ -1,0 +1,2 @@
+# EvoCore evolution engine uses ONLY the Python standard library.
+# No third-party packages required (Python >= 3.9).
