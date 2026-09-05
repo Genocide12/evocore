@@ -1,22 +1,38 @@
-# EvoCore — саморазвивающаяся программа / Self-Evolving Program
+<div align="center">
 
-> Программа, которая переписывает собственный код и становится быстрее —
-> с живым веб-дашбордом в реальном времени.
-> A program that rewrites its own code to become faster — with a real-time web dashboard.
+# EvoCore
 
----
+**Саморазвивающаяся программа · Self-Evolving Program**
 
-## 🇷🇺 Русский
+Генетический алгоритм, который улучшает собственный исходный код: порождает популяцию мутантов,
+проверяет их на корректность и скорость — и переписывает собственный файл генома, если новый код быстрее.
+Веб-дашборд показывает эволюцию в реальном времени.
 
-### Что это
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)
 
-EvoCore — это демонстрация **настоящей** (не симулированной) самоэволюции кода.
-Внутри живёт «организм»: Python-файл `evolution/genome_core.py` с горячей функцией
-`hot_path()`. Генетический алгоритм порождает реальные варианты исходного кода,
-проверяет их на корректность и скорость, и если чемпион статистически быстрее —
-**перезаписывает файл собственного генома**. Программа продолжает жить на новом коде.
+![Дашборд EvoCore](docs/dashboard.png)
 
-**Как это работает:**
+</div>
+
+## Как это работает
+
+Проект состоит из двух частей: **движка эволюции** (`evolution/evolution_core.py`) и **живого генома**
+(`evolution/genome_core.py`) — обычного Python-модуля с «горячей» функцией `hot_path()`, которую движок
+сам исполняет в каждом поколении (metabolism). Жизненный цикл поколения:
+
+1. **Мутация и кроссовер** — движок генерирует популяцию реальных вариантов исходного кода
+   (стратегии: `naive`, `pow_cache`, `horner`, `direct`, `unroll` и их параметризации).
+2. **Гейт корректности** — каждый вариант сверяется с эталонной реализацией (допуск `1e-9`);
+   ошибочный код отбраковывается.
+3. **Бенчмарк** — замер производительности в одном временном окне, head-to-head против текущего
+   чемпиона (3 чередующихся раунда, best-of-3).
+4. **Установка** — если чемпион статистически быстрее текущего кода организма более чем на 1.5%,
+   движок **атомарно перезаписывает собственный файл генома**. Следующее поколение живёт уже на новом коде.
+5. **Стагнация и иммиграция** — после серии поколений без улучшений в популяцию вливаются свежие
+   мутанты (punctuated equilibrium).
 
 ```
  ┌──────────────┐   мутанты (реальный Python-код)
@@ -36,142 +52,92 @@ EvoCore — это демонстрация **настоящей** (не сим�
               Следующее поколение живёт на новом коде
 ```
 
-Проверено: организм ускоряется примерно в **×4.4–4.8** за первые поколения
-(полином 8-й степени, fitness = элементов/сек).
+Типичный результат: организм ускоряется в **×4.4–4.8** относительно наивного базового кода
+за первые поколения эволюции (задача: полином 8-й степени, 24 000 элементов, fitness = elem/s).
 
-### Структура проекта
+## Возможности
+
+- **Настоящая эволюция кода** — без симуляций: варианты пишутся как реальные исходники,
+  компилируются, тестируются и исполняются.
+- **Атомная самоперезапись** — геном меняется только после гейта корректности и
+  head-to-head верификации; неудачная установка исключена.
+- **Живой дашборд** — график приспособленности с отметками установок кода, просмотр текущего
+  исходника организма, журнал событий, управление запуском (старт / стоп / сброс).
+- **Воспроизводимость** — `--reset` возвращает наивный базовый геном; состояние изолировано
+  в `evolution/state/`.
+- **Ноль зависимостей Python** — движок использует только стандартную библиотеку.
+
+## Быстрый старт
+
+**Требования:** Node.js ≥ 20, Python ≥ 3.9.
+
+```bash
+git clone https://github.com/Genocide12/evocore.git
+cd evocore
+npm install
+npm run dev
+```
+
+Откройте `http://localhost:3000` и нажмите **«Старт эволюции»**.
+
+## Консольный режим
+
+Движок полностью управляется и без дашборда:
+
+```bash
+python3 evolution/evolution_core.py --generations 50 --population 16   # запуск эволюции
+python3 evolution/evolution_core.py --reset                            # сброс к базовому геному
+python3 evolution/evolution_core.py --quiet                            # вывод без ANSI-цветов
+```
+
+## Дашборд
+
+| Элемент | Описание |
+| --- | --- |
+| Стат-карточки | поколение, лучший fitness, ускорение к baseline, метаболизм организма |
+| График | fitness по поколениям; зелёные точки — моменты перезаписи кода (install) |
+| Код организма | текущий исходник `genome_core.py` в реальном времени |
+| Журнал эволюции | события движка: старты, установки, стагнации, финал |
+
+## Архитектура
 
 ```
 evocore/
 ├── evolution/
-│   ├── evolution_core.py   # движок: GA, мутации, гейты, бенчмарк, атомная запись
-│   └── genome_core.py      # ГЕНОМ — файл, который программа переписывает сама
+│   ├── evolution_core.py   # движок: GA, операторы, гейты, бенчмарк, атомная запись
+│   ├── genome_core.py      # геном — файл, который программа перезаписывает сама
+│   └── state/              # состояние прогона (создаётся в рантайме)
 ├── src/
-│   ├── app/                # Next.js дашборд + API (/api/evolution/status, /control)
-│   ├── components/ui/      # shadcn/ui компоненты
-│   └── lib/evolution.ts    # управление процессом движка (spawn/stop/reset)
+│   ├── app/                # Next.js: дашборд + API (/api/evolution/status, /control)
+│   ├── components/ui/      # shadcn/ui
+│   └── lib/evolution.ts    # управление процессом движка (spawn / stop / reset)
+├── docs/dashboard.png      # скриншот дашборда
 ├── Dockerfile              # Node 20 + Python 3 в одном образе
 └── package.json
 ```
 
-### Требования
+## Развёртывание
 
-- **Node.js ≥ 20**
-- **Python ≥ 3.9** (только стандартная библиотека, `pip install` не нужен)
+Приложение состоит из долгоживущего Node.js-сервера, фонового Python-процесса и записываемого
+состояния, поэтому ему нужна постоянная среда выполнения. В репозитории готов Dockerfile
+(Node 20 + Python 3).
 
-### Локальный запуск
+**Docker**
 
 ```bash
-npm install
-npm run dev          # дашборд: http://localhost:3000
+docker build -t evocore .
+docker run -d -p 3000:3000 --name evocore evocore
 ```
 
-Откройте `http://localhost:3000` и нажмите **«Начать эволюцию»** — увидите
-поколения, график приспособленности и момент перезаписи генома (зелёная точка).
+**Railway / Render / Fly.io** — импортируйте репозиторий из GitHub: платформа обнаружит
+Dockerfile автоматически. Порт — `3000`.
 
-Либо можно управлять движком напрямую из консоли:
-
-```bash
-python3 evolution/evolution_core.py --generations 50 --population 16   # запуск
-python3 evolution/evolution_core.py --reset                            # сброс к базовому геному
-```
-
-### Деплой
-
-#### ⚠️ Vercel — НЕ подойдёт для движка
-
-Дашборд соберётся и откроется, но кнопка «Старт» работать не будет. Движку нужны
-три вещи, которые противоречат serverless-модели Vercel:
-
-| Что нужно движку                | Что даёт Vercel                          |
-|--------------------------------|------------------------------------------|
-| Долгоживущий фоновый процесс    | Функция умирает через 10–60 c            |
-| Запись `genome_core.py` и state | Файловая система read-only (кроме /tmp)  |
-| `spawn` дочернего python3       | Нет гарантий для фоновых процессов       |
-
-EvoCore — это **постоянно живущий процесс с состоянием на диске**, то есть ровно
-то, чем serverless не является. На Vercel можно выложить только «витрину»
-без запуска эволюции.
-
-#### ✅ Где работает по-настоящему
-
-**Вариант 1 — Railway / Render / Fly.io (проще всего, есть Dockerfile):**
-
-1. Запушьте репозиторий на GitHub (см. ниже).
-2. Railway: `New Project → Deploy from GitHub` — платформа сама найдёт Dockerfile.
-3. Render: `New → Web Service → выберите репозиторий → Environment: Docker`.
-4. Fly.io: `fly launch` (детектор найдёт Dockerfile) → `fly deploy`.
-
-Порт: 3000. Все три платформы держат постоянный процесс и диск — движок будет
-эволюционировать 24/7, а дашборд доступен из любой точки мира.
-
-**Вариант 2 — VPS (Hetzner / DigitalOcean / Oracle Free tier):**
+**VPS** — те же команды Docker, либо классически:
 
 ```bash
-git clone https://github.com/<вы>/evocore.git && cd evocore
-docker build -t evocore . && docker run -d -p 3000:3000 --name evocore evocore
-# или без Docker:
 npm install && npm run build && npm start
 ```
 
-**Вариант 3 — локально** (см. «Локальный запуск» выше).
+## Лицензия
 
-#### Публикация на GitHub
-
-```bash
-cd evocore
-git init && git add . && git commit -m "EvoCore: self-evolving program"
-git branch -M main
-git remote add origin https://github.com/<вы>/evocore.git
-git push -u origin main
-```
-
-Состояние организма (`evolution/state/`) в git не попадает — каждый запуск
-начинается с наивного базового генома, и эволюцию можно наблюдать с нуля.
-
----
-
-## 🇬🇧 English
-
-### What is this
-
-EvoCore demonstrates **genuine** (not simulated) code self-evolution. Inside lives
-an "organism": the Python file `evolution/genome_core.py` with a hot function
-`hot_path()`. A genetic algorithm breeds real source-code variants, gates them on
-correctness and speed, and when a champion is statistically faster it **atomically
-rewrites its own genome file**. The program keeps living on the new code.
-
-Measured result: the organism gets **~×4.4–4.8 faster** within the first
-generations (degree-8 polynomial, fitness = elements/sec).
-
-### Requirements
-
-- **Node.js ≥ 20**, **Python ≥ 3.9** (stdlib only — no pip packages)
-
-### Run locally
-
-```bash
-npm install
-npm run dev        # dashboard: http://localhost:3000
-```
-
-Open the dashboard and press **Start evolution**. Or drive the engine directly:
-
-```bash
-python3 evolution/evolution_core.py --generations 50 --population 16
-python3 evolution/evolution_core.py --reset
-```
-
-### Deployment
-
-**Vercel will NOT work for the engine** (only the static dashboard would render):
-serverless functions die in seconds, the filesystem is read-only, and no
-background processes survive the request. EvoCore is a stateful, long-lived
-process by design.
-
-**Deploy where it works** — Railway / Render / Fly.io (Dockerfile included, port
-3000) or any VPS via `docker build -t evocore . && docker run -p 3000:3000 evocore`.
-
-### License
-
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
