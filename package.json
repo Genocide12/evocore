@@ -1,8 +1,8 @@
 {
   "name": "evocore",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Эво — живое существо из кода: нажми кнопку и смотри, как программа сама себя переписывает и растёт. EvoCore — self-evolving program with a child-simple live dashboard",
+  "description": "Эво — тамагочи из кода: живёт на сервере 24/7, сам переписывает свой код и растёт, даже когда сайт закрыт. EvoCore — a Tamagotchi-like self-evolving program",
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",

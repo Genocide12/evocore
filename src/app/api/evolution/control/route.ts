@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readState, resetEngine, startEngine, stopEngine } from "@/lib/evolution";
+import { feedPet, readState, resetEngine, startEngine, startLiveEngine, stopEngine } from "@/lib/evolution";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
 const BodySchema = z.object({
-  action: z.enum(["start", "stop", "reset"]),
+  action: z.enum(["start", "stop", "reset", "live", "feed"]),
   generations: z.number().int().min(5).max(500).optional(),
   population: z.number().int().min(6).max(64).optional(),
 });
@@ -36,6 +36,12 @@ export async function POST(req: NextRequest) {
     result = startEngine(generations ?? 50, population ?? 16);
   } else if (action === "stop") {
     result = stopEngine();
+  } else if (action === "live") {
+    // вернуть Эво в живой режим (Tamagotchi), если кто-то останавливал движок
+    result = startLiveEngine();
+  } else if (action === "feed") {
+    // покормить: следующие поколения пройдут в ускоренном темпе
+    result = feedPet();
   } else {
     result = resetEngine();
   }

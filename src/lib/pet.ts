@@ -10,6 +10,25 @@ export interface PetLevel {
   crown: boolean;
 }
 
+// ─── Длительности по-человечески («2 ч 5 мин», «3 дн 4 ч») ───
+
+export function formatDuration(ms: number): string {
+  const totalMin = Math.max(0, Math.floor(ms / 60000));
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `${d} дн ${h} ч`;
+  if (h > 0) return `${h} ч ${m} мин`;
+  if (m > 0) return `${m} мин`;
+  return "меньше минуты";
+}
+
+export function formatAge(bornIso: string | undefined): string {
+  const born = bornIso ? Date.parse(bornIso) : NaN;
+  if (!Number.isFinite(born)) return "только что родился";
+  return formatDuration(Date.now() - born);
+}
+
 export const LEVELS: PetLevel[] = [
   { min: 0.0, name: "Яичко", emoji: "🥚", scale: 0.78, sparkles: 0, antenna: false, crown: false },
   { min: 1.1, name: "Птенчик", emoji: "🐣", scale: 0.88, sparkles: 1, antenna: false, crown: false },
@@ -70,6 +89,31 @@ export function translateEvent(e: {
     };
   }
 
+  if (msg.startsWith("RECORD")) {
+    const m = msg.match(/x(\d+(?:\.\d+)?)/);
+    return {
+      id: `${e.time}|${msg.length}`,
+      time: e.time,
+      emoji: "🏆",
+      tone: "win",
+      text: m ? `Новый личный рекорд: сила ×${m[1]}!` : "Новый личный рекорд силы!",
+    };
+  }
+
+  if (msg.startsWith("Угощение")) {
+    return {
+      id: `${e.time}|${msg.length}`,
+      time: e.time,
+      emoji: "🍎",
+      tone: "win",
+      text: "Ура, угощение! Кушаю и учусь быстрее",
+    };
+  }
+
+  if (msg.startsWith("Витамины")) {
+    return null; // служебное — не спамим в дневнике
+  }
+
   if (msg.startsWith("GEN")) {
     if (!msg.includes("UPDATE")) return null; // обычные поколения не спамим в ленте
     const m = msg.match(/^GEN (\d+)/);
@@ -103,6 +147,15 @@ export function translateEvent(e: {
   }
 
   if (msg.startsWith("START")) {
+    if (msg.includes("живой режим")) {
+      return {
+        id: `${e.time}|${msg.length}`,
+        time: e.time,
+        emoji: "☀️",
+        tone: "info",
+        text: "Я снова живу и учусь — буду расти без остановки!",
+      };
+    }
     return {
       id: `${e.time}|${msg.length}`,
       time: e.time,
@@ -117,9 +170,9 @@ export function translateEvent(e: {
     return {
       id: `${e.time}|${msg.length}`,
       time: e.time,
-      emoji: "🏁",
-      tone: "win",
-      text: m ? `Урок окончен! Моя сила ×${m[1]}` : "Урок окончен!",
+      emoji: "💤",
+      tone: "info",
+      text: m ? `Заснул на минутку. Моя сила ×${m[1]}` : "Заснул на минутку…",
     };
   }
 

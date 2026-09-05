@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { EvolutionState } from "@/lib/evolution";
-import { levelFor, translateEvent, type FeedItem } from "@/lib/pet";
+import type { AwayReport, EvolutionState } from "@/lib/evolution";
+import { formatAge, levelFor, translateEvent, type FeedItem } from "@/lib/pet";
 import Creature from "@/components/pet/creature";
 import CodeWindow from "@/components/pet/code-window";
 import Confetti from "@/components/pet/confetti";
+import AwayModal from "@/components/pet/away-report";
 
 // ─── плавный счётчик чисел ───
 function useCountUp(target: number, dur = 800): number {
@@ -36,60 +37,58 @@ function useCountUp(target: number, dur = 800): number {
   return val;
 }
 
+const LS_SEEN = "evocore_seen_v2"; // когда последний раз был пользователь
+const LS_VISITED = "evocore_visited_v2"; // уже знакомы с Эво
 const LS_BEST = "evocore_best_v1";
-const LS_REWRITES = "evocore_rewrites_v1";
-const LS_AUTO = "evocore_auto_v1";
+
+const FEED_COOLDOWN_MS = 30000; // можно кормить раз в полминуты
+const FEED_JOY_MS = 12000; // сколько Эво «кушает» на экране
 
 export default function Home() {
   const [st, setSt] = useState<EvolutionState | null>(null);
-  const [running, setRunning] = useState(false);
+  const [alive, setAlive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [excited, setExcited] = useState(false);
+  const [feeding, setFeeding] = useState(false);
+  const [feedCooldown, setFeedCooldown] = useState(false);
   const [fireKey, setFireKey] = useState(0);
   const [installBanner, setInstallBanner] = useState<string | null>(null);
   const [recordBanner, setRecordBanner] = useState<string | null>(null);
-  const [rewrites, setRewrites] = useState(0);
-  const [auto, setAuto] = useState(true);
+  const [away, setAway] = useState<AwayReport | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [firstVisit, setFirstVisit] = useState(false);
 
   const lastCodeRef = useRef<string | null>(null);
   const prevGenRef = useRef(0);
-  const prevRunningRef = useRef(false);
   const bestRef = useRef(0);
   const bestInitRef = useRef(false);
-  const userStoppedRef = useRef(false);
-  const autoBusyRef = useRef(false);
-  const autoRef = useRef(auto);
+  const pendingSinceRef = useRef(0); // «пока тебя не было»: живёт до первого успешного ответа
 
-  // ─── стартовое состояние из localStorage ───
-  useEffect(() => {
-    const t = setTimeout(() => {
-      setRewrites(parseInt(localStorage.getItem(LS_REWRITES) ?? "0", 10) || 0);
-      setAuto(localStorage.getItem(LS_AUTO) !== "0");
-    }, 0);
-    return () => clearTimeout(t);
-  }, []);
-
-  // синхронизация авто-режима для колбэков
-  useEffect(() => {
-    autoRef.current = auto;
-  }, [auto]);
-
-  // ─── опрос состояния ───
+  // ─── опрос живого состояния ───
   const poll = useCallback(async () => {
     try {
-      const res = await fetch("/api/evolution/status", { cache: "no-store" });
-      const data = (await res.json()) as { ok: boolean; running: boolean; state: EvolutionState | null };
-      setRunning(data.running);
+      const since = pendingSinceRef.current;
+      const url = since > 0 ? `/api/pet?since=${since}` : "/api/pet";
+      const res = await fetch(url, { cache: "no-store" });
+      const data = (await res.json()) as {
+        ok: boolean;
+        alive: boolean;
+        state: EvolutionState | null;
+        away: AwayReport | null;
+      };
+      if (!data.ok) return; // сервер прогружается — попробуем на следующем тике, since сохранится
+      pendingSinceRef.current = 0; // ответ получен — отчёт запрошен один раз
+      setAlive(data.alive);
       const s = data.state;
       if (!s) return;
       setSt(s);
+      if (data.away) setAway(data.away);
 
-      // рекордная база: не празднуем чужие прошлые рекорды при первом заходе
+      // рекордная база: личный рекорд Эво за всю жизнь + локальный
       if (!bestInitRef.current) {
         bestInitRef.current = true;
         const saved = parseFloat(localStorage.getItem(LS_BEST) ?? "0");
-        bestRef.current = Math.max(saved, s.speedup);
+        bestRef.current = Math.max(saved, s.best_speedup_ever ?? 0, s.speedup);
       }
 
       const gen = s.generation;
@@ -102,11 +101,6 @@ export default function Home() {
         setExcited(true);
         setTimeout(() => setExcited(false), 2600);
         setTimeout(() => setInstallBanner(null), 6000);
-        setRewrites((r) => {
-          const nr = r + 1;
-          localStorage.setItem(LS_REWRITES, String(nr));
-          return nr;
-        });
         // рекорд силы празднуем ТОЛЬКО при реальном переписывании кода (не на шуме замеров)
         if (s.speedup > bestRef.current + 0.001 && s.speedup > 1.01) {
           bestRef.current = s.speedup;
@@ -118,80 +112,105 @@ export default function Home() {
       }
       if (s.installed_code) lastCodeRef.current = s.installed_code;
 
-      // автопродолжение: урок кончился — Эво начинает новый сам
-      if (
-        prevRunningRef.current &&
-        !data.running &&
-        autoRef.current &&
-        !userStoppedRef.current &&
-        gen > 0 &&
-        s.max_generations > 0 &&
-        gen >= s.max_generations &&
-        !autoBusyRef.current
-      ) {
-        autoBusyRef.current = true;
-        setTimeout(async () => {
-          try {
-            await fetch("/api/evolution/control", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "start", generations: 200, population: 16 }),
-            });
-          } catch {
-            /* ignore */
-          } finally {
-            setTimeout(() => (autoBusyRef.current = false), 4000);
-          }
-        }, 1500);
-      }
-
       prevGenRef.current = gen;
-      prevRunningRef.current = data.running;
     } catch {
       /* сеть моргнула — попробуем на следующем тике */
     }
   }, []);
 
+  // ─── первый заход: отчёт «пока тебя не было» + метка визита ───
   useEffect(() => {
-    const t0 = setTimeout(poll, 0);
-    const t = setInterval(poll, 1200);
+    const t0 = setTimeout(() => {
+      const seen = parseInt(localStorage.getItem(LS_SEEN) ?? "0", 10) || 0;
+      const visited = localStorage.getItem(LS_VISITED) === "1";
+      setFirstVisit(!visited);
+      localStorage.setItem(LS_VISITED, "1");
+      pendingSinceRef.current = seen;
+      poll();
+    }, 0);
+    const t = setInterval(() => poll(), 1500);
+
+    // держим метку «последний визит» свежей: интервал + уход со страницы
+    const markSeen = () => {
+      try {
+        localStorage.setItem(LS_SEEN, String(Date.now()));
+      } catch {
+        /* приватный режим — ладно */
+      }
+    };
+    const seenTimer = setInterval(markSeen, 10000);
+    const onHide = () => {
+      if (document.visibilityState === "hidden") markSeen();
+    };
+    window.addEventListener("pagehide", markSeen);
+    document.addEventListener("visibilitychange", onHide);
     return () => {
       clearTimeout(t0);
       clearInterval(t);
+      clearInterval(seenTimer);
+      window.removeEventListener("pagehide", markSeen);
+      document.removeEventListener("visibilitychange", onHide);
     };
   }, [poll]);
 
-  // ─── кнопки ───
-  const control = useCallback(async (action: "start" | "stop" | "reset") => {
+  // конфетти, если пока нас не было Эво переписывал код
+  useEffect(() => {
+    if (away && away.rewrites > 0) {
+      const t = setTimeout(() => setFireKey((k) => k + 1), 50);
+      return () => clearTimeout(t);
+    }
+  }, [away]);
+
+  // ─── покормить: ускорит обучение на несколько поколений ───
+  const doFeed = useCallback(async () => {
+    if (feedCooldown || busy) return;
     setBusy(true);
     try {
-      if (action === "start") {
-        userStoppedRef.current = false;
-      } else if (action === "stop") {
-        userStoppedRef.current = true;
-      } else {
-        userStoppedRef.current = true;
-        lastCodeRef.current = null;
-        bestRef.current = 1;
-        bestInitRef.current = false;
-        localStorage.setItem(LS_BEST, "0");
-        localStorage.setItem(LS_REWRITES, "0");
-        setRewrites(0);
-      }
       await fetch("/api/evolution/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, generations: 200, population: 16 }),
+        body: JSON.stringify({ action: "feed" }),
       });
+      setFeeding(true);
+      setFeedCooldown(true);
+      setTimeout(() => setFeeding(false), FEED_JOY_MS);
+      setTimeout(() => setFeedCooldown(false), FEED_COOLDOWN_MS);
       await poll();
     } finally {
       setBusy(false);
-      if (action === "reset") setConfirmReset(false);
     }
-  }, [poll]);
+  }, [feedCooldown, busy, poll]);
+
+  // ─── новая жизнь / оживить ───
+  const control = useCallback(
+    async (action: "reset" | "live") => {
+      setBusy(true);
+      try {
+        if (action === "reset") {
+          lastCodeRef.current = null;
+          bestRef.current = 1;
+          bestInitRef.current = false;
+          prevGenRef.current = 0;
+          pendingSinceRef.current = 0;
+          localStorage.setItem(LS_BEST, "0");
+          localStorage.setItem(LS_SEEN, String(Date.now()));
+        }
+        await fetch("/api/evolution/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        await poll();
+      } finally {
+        setBusy(false);
+        if (action === "reset") setConfirmReset(false);
+      }
+    },
+    [poll]
+  );
 
   // ─── лента «дневник» ───
-  const feed: FeedItem[] = useMemo(() => {
+  const diary: FeedItem[] = useMemo(() => {
     const ev = st?.events ?? [];
     const out: FeedItem[] = [];
     for (let i = ev.length - 1; i >= 0 && out.length < 12; i--) {
@@ -205,8 +224,9 @@ export default function Home() {
   const shown = useCountUp(speedup);
   const { level, next, progress } = levelFor(speedup);
   const gen = st?.generation ?? 0;
-  const maxGen = st?.max_generations ?? 0;
-  const fresh = gen === 0 && !running && speedup <= 1.05;
+  const totalGen = st?.total_generations ?? gen;
+  const totalRewrites = st?.total_rewrites ?? 0;
+  const fresh = totalGen === 0 && speedup <= 1.05;
 
   return (
     <main className="min-h-screen bg-[radial-gradient(80%_60%_at_50%_0%,#0c2a22_0%,#09090b_55%)] text-zinc-100">
@@ -219,6 +239,15 @@ export default function Home() {
         </div>
       )}
 
+      {/* отчёт «пока тебя не было» */}
+      {away && (
+        <AwayModal
+          report={away}
+          speedupNow={st?.speedup ?? 1}
+          onClose={() => setAway(null)}
+        />
+      )}
+
       <div className="mx-auto max-w-md px-4 pb-16 pt-6 lg:grid lg:max-w-5xl lg:grid-cols-[380px_1fr] lg:gap-10">
         {/* ══════════ левая колонка: существо и сила ══════════ */}
         <section className="lg:sticky lg:top-6 lg:self-start">
@@ -228,15 +257,18 @@ export default function Home() {
             </h1>
             <div
               className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                running ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-800 text-zinc-400"
+                alive ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-800 text-zinc-400"
               }`}
             >
-              {running ? "учится 💫" : gen > 0 ? "отдыхает 😴" : "ждёт 🥚"}
+              {alive ? "живу 24/7 💫" : "перезапуск… 💤"}
             </div>
           </div>
-          <p className="mb-2 text-sm text-zinc-400">Я программирую сам себя и расту!</p>
+          <p className="text-sm text-zinc-400">Я программирую сам себя и расту!</p>
+          <p className="mb-2 text-xs text-zinc-500">
+            мне {formatAge(st?.born_at)} · поколений прожито: <b className="tabular-nums text-zinc-400">{totalGen}</b>
+          </p>
 
-          <Creature speedup={speedup} running={running} excited={excited} />
+          <Creature speedup={speedup} running={alive} excited={excited} feeding={feeding} />
 
           {/* Сила */}
           <div className="mt-2 text-center">
@@ -270,50 +302,41 @@ export default function Home() {
 
           {/* поколение */}
           <div className="mt-3 text-center text-xs text-zinc-500">
-            {running ? (
+            {alive ? (
               <>
-                Поколение <b className="text-emerald-300">{gen}</b>
-                {maxGen > 0 && <> из {maxGen}</>} — тренируюсь…
+                Сейчас идёт поколение <b className="text-emerald-300">{gen}</b> — я тренируюсь…
               </>
             ) : (
-              <>Пройдено поколений: {gen}</>
+              <>Просыпаюсь… сторож перезапустит меня через несколько секунд 💤</>
             )}
           </div>
 
-          {/* главная кнопка */}
+          {/* кормёжка */}
           <button
-            onClick={() => control(running ? "stop" : "start")}
-            disabled={busy}
+            onClick={doFeed}
+            disabled={busy || feedCooldown}
             className={`mt-5 w-full rounded-2xl py-4 text-xl font-black shadow-lg transition-all active:scale-95 disabled:opacity-60 ${
-              running
-                ? "border border-zinc-700 bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+              feeding
+                ? "bg-gradient-to-r from-amber-400 to-orange-300 text-amber-950"
                 : "bg-gradient-to-r from-emerald-500 to-lime-400 text-emerald-950 hover:brightness-110"
             }`}
           >
-            {running ? "⏸ Стоп" : fresh ? "🚀 Расти!" : "▶ Расти ещё!"}
+            {feeding ? "🍎 ням-ням! расту быстрее…" : feedCooldown ? "🙂 спасибо, я сыт!" : "🍎 Покормить витаминами"}
           </button>
+          <p className="mt-2 text-center text-[11px] leading-relaxed text-zinc-500">
+            Витамины ускоряют мои уроки. Но даже без них я живу и учусь на сервере
+            круглосуточно — закрой сайт и вернись позже!
+          </p>
 
-          {/* бесконечный рост + сброс */}
-          <div className="mt-3 flex items-center justify-between text-xs">
-            <button
-              onClick={() => {
-                const nv = !auto;
-                setAuto(nv);
-                localStorage.setItem(LS_AUTO, nv ? "1" : "0");
-              }}
-              className={`rounded-full px-3 py-1.5 font-medium transition-colors ${
-                auto ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-800 text-zinc-500"
-              }`}
-            >
-              🔄 Авто-рост: {auto ? "вкл" : "выкл"}
-            </button>
+          {/* новая жизнь */}
+          <div className="mt-3 text-center">
             {confirmReset ? (
               <button
                 onClick={() => control("reset")}
                 disabled={busy}
-                className="rounded-full bg-rose-500/15 px-3 py-1.5 font-semibold text-rose-300 hover:bg-rose-500/25"
+                className="rounded-full bg-rose-500/15 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25"
               >
-                Точно начать с яйца?
+                Точно начать новую жизнь с яичка?
               </button>
             ) : (
               <button
@@ -321,9 +344,9 @@ export default function Home() {
                   setConfirmReset(true);
                   setTimeout(() => setConfirmReset(false), 4000);
                 }}
-                className="rounded-full px-3 py-1.5 text-zinc-500 hover:text-zinc-300"
+                className="rounded-full px-3 py-1.5 text-xs text-zinc-600 hover:text-zinc-400"
               >
-                Сбросить
+                🔄 Новая жизнь
               </button>
             )}
           </div>
@@ -331,13 +354,14 @@ export default function Home() {
 
         {/* ══════════ правая колонка: код и дневник ══════════ */}
         <section className="mt-8 space-y-4 lg:mt-0">
-          {/* приветствие для новичка */}
-          {fresh && (
+          {/* приветствие новичку */}
+          {fresh && firstVisit && !away && (
             <div className="evo-pop rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm leading-relaxed text-emerald-100">
-              <b>Привет! Я Эво 🥚</b> — существо, сотканное из кода.
+              <b>Привет! Я Эво 🥚</b> — тамагочи, сотканное из кода.
               <br />
-              Нажми <b className="text-emerald-300">«Расти!»</b> — и я сам буду писать себе новый код, пробовать его,
-              выбрасывать неудачные версии и становиться быстрее. Прямо у тебя на глазах!
+              Я живу на сервере и никогда не сплю: сам пишу себе новый код, пробую его,
+              выбрасываю неудачные версии и становлюсь быстрее. <b className="text-emerald-300">Закрой сайт
+              и вернись позже</b> — я расскажу, что успел сделать без тебя!
             </div>
           )}
 
@@ -348,22 +372,22 @@ export default function Home() {
             </div>
           )}
 
-          {running && (
+          {alive && (
             <div className="animate-pulse text-center text-sm text-zinc-400">
               💭 думаю, пробую новые варианты кода…
             </div>
           )}
 
-          <CodeWindow code={st?.installed_code ?? ""} running={running} rewrites={rewrites} />
+          <CodeWindow code={st?.installed_code ?? ""} running={alive} rewrites={totalRewrites} />
 
           {/* дневник */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
             <h2 className="mb-2.5 text-sm font-bold text-zinc-300">📖 Дневник Эво</h2>
-            {feed.length === 0 ? (
-              <p className="text-sm text-zinc-500">Пока пусто. Нажми «Расти!» — и здесь появится история моих побед!</p>
+            {diary.length === 0 ? (
+              <p className="text-sm text-zinc-500">Пока пусто — я только проснулся. Скоро здесь появятся мои победы!</p>
             ) : (
               <ul className="space-y-2">
-                {feed.map((f) => (
+                {diary.map((f) => (
                   <li
                     key={`${f.time}-${f.id}`}
                     className={`flex items-start gap-2.5 rounded-xl px-3 py-2 text-sm leading-snug ${

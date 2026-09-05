@@ -40,6 +40,7 @@ STATE_DIR = os.path.join(BASE_DIR, "state")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 PID_PATH = os.path.join(STATE_DIR, "evolution.pid")
 RUN_LOG_PATH = os.path.join(STATE_DIR, "run.log")
+FEED_FLAG_PATH = os.path.join(STATE_DIR, "feed.flag")  # «покормить»: ускоряет жизнь
 
 # ------------------------- Неизменяемая «среда» -------------------------
 # Целевая функция: полином степени 8 по 9 коэффициентам.
@@ -54,6 +55,16 @@ VERIFY_GAIN = 1.005           # предфильтр перед head-to-head п�
 STAGNATION_BURST = 8          # поколений без апдейта → всплеск иммиграции
 POP_MIN, POP_MAX = 6, 64
 GEN_MAX = 500
+
+# ----------------------- Живой режим (Tamagotchi) -----------------------
+# Эво живёт на сервере постоянно: бесконечный цикл поколений со спокойным
+# темпом. Кормёжка (feed.flag) на 12 поколений ускоряет обучение.
+
+LIVE_PACE_DEFAULT = 2.5       # сек между поколениями в живом режиме
+BOOST_GENERATIONS = 12        # сколько поколений длится ускорение после кормёжки
+CHECKPOINT_EVERY = 60         # сек между контрольными точками (для отчёта «пока тебя не было»)
+CHECKPOINTS_CAP = 2000        # хвост контрольных точек (~33 часа покрытия)
+MILESTONES_CAP = 120          # хвост важных событий (переписывания кода / рекорды)
 
 STRATEGIES = ("naive", "pow_cache", "horner", "direct", "unroll")
 NAIVE_GENOME = {"strategy": "naive", "params": {}}
@@ -336,10 +347,14 @@ def now_iso() -> str:
 # ------------------------------ Движок ---------------------------------
 
 class EvolutionEngine:
-    def __init__(self, generations: int, population: int, quiet: bool = False):
+    def __init__(self, generations: int, population: int, quiet: bool = False,
+                 live: bool = False, pace: float = LIVE_PACE_DEFAULT):
         self.generations = generations
         self.population = population
         self.quiet = quiet
+        self.live = live                 # Tamagotchi: жить без остановки
+        self.pace = max(0.5, float(pace))
+        self.boost_left = 0              # сколько поколений ещё «кушаем» (ускоренный темп)
         self.rng = random.Random(time.time_ns() & 0xFFFFFFFF)
         self.stop_flag = False
 
@@ -364,11 +379,18 @@ class EvolutionEngine:
         # данные арены: последний заезд + журнал победителей (для коэффициентов)
         self.last_race: dict = None
         self.race_log: list = []
+        # жизнь тамагочи: копится ВСЮ жизнь организма (переживает рестарты движка)
+        self.born_at: str = now_iso()
+        self.total_generations: int = 0
+        self.total_rewrites: int = 0
+        self.best_speedup_ever: float = 0.0
+        self.milestones: list = []     # важные события (install/рекорды) с полным ts
+        self.checkpoints: list = []    # контрольные точки счётчиков для away-отчёта
 
     # -------- служебное --------
 
     def log(self, kind: str, msg: str) -> None:
-        evt = {"time": datetime.now().strftime("%H:%M:%S"), "type": kind, "msg": msg}
+        evt = {"time": datetime.now().strftime("%H:%M:%S"), "ts": time.time(), "type": kind, "msg": msg}
         self.events.append(evt)
         if len(self.events) > 300:
             self.events = self.events[-300:]
@@ -385,8 +407,14 @@ class EvolutionEngine:
         except Exception:
             pass
 
+    def _milestone(self, kind: str, msg: str) -> None:
+        """Важное событие жизни (переписывание кода, рекорд) — живёт долго."""
+        self.milestones.append({"time": datetime.now().strftime("%H:%M:%S"), "ts": time.time(), "type": kind, "msg": msg})
+        if len(self.milestones) > MILESTONES_CAP:
+            self.milestones = self.milestones[-MILESTONES_CAP:]
+
     def load_state(self) -> None:
-        """Продолжение предыдущего прогона: наследование установленного генома."""
+        """Продолжение жизни: наследование генома и накопленной статистики."""
         if not os.path.exists(STATE_PATH):
             return
         try:
@@ -396,7 +424,23 @@ class EvolutionEngine:
             if isinstance(g, dict) and g.get("strategy") in STRATEGIES:
                 self.installed_genome = {"strategy": g["strategy"], "params": dict(g.get("params", {}) or {})}
             self.history = list(st.get("history", []))[-1000:]
-            self.events = list(st.get("events", []))[-300:]
+            evs = []
+            for e in list(st.get("events", []))[-300:]:
+                if isinstance(e, dict):
+                    e.setdefault("ts", 0.0)
+                    evs.append(e)
+            self.events = evs
+            # жизнь тамагочи — восстанавливаем накопленное
+            self.born_at = st.get("born_at") or self.born_at
+            self.total_generations = int(st.get("total_generations", 0) or 0)
+            self.total_rewrites = int(st.get("total_rewrites", 0) or 0)
+            self.best_speedup_ever = float(st.get("best_speedup_ever", 0.0) or 0.0)
+            ms = st.get("milestones")
+            if isinstance(ms, list):
+                self.milestones = ms[-MILESTONES_CAP:]
+            cps = st.get("checkpoints")
+            if isinstance(cps, list):
+                self.checkpoints = cps[-CHECKPOINTS_CAP:]
             # baseline_speed НЕ наследуем: он честно перемеряется в каждом окне
             self.best_speed = float(st.get("best_speed", 0.0)) or 0.0
             bg = st.get("best_genome")
@@ -462,7 +506,7 @@ class EvolutionEngine:
         st = {
             "running": running,
             "generation": self.generation,
-            "max_generations": self.generations,
+            "max_generations": 0 if self.live else self.generations,
             "population": self.population,
             "installed_genome": self.installed_genome,
             "installed_code": self.installed_source,
@@ -478,6 +522,14 @@ class EvolutionEngine:
             "race_log": self.race_log[-60:],
             "started_at": self.started_at,
             "updated_at": now_iso(),
+            # жизнь тамагочи
+            "live": bool(self.live),
+            "born_at": self.born_at,
+            "total_generations": self.total_generations,
+            "total_rewrites": self.total_rewrites,
+            "best_speedup_ever": round(self.best_speedup_ever, 3),
+            "milestones": self.milestones[-MILESTONES_CAP:],
+            "checkpoints": self.checkpoints[-CHECKPOINTS_CAP:],
         }
         tmp = STATE_PATH + ".tmp"
         try:
@@ -564,11 +616,13 @@ class EvolutionEngine:
         self.installed_fn = fn2
         self.metabolize()
         speedup = self.installed_speed / self.baseline_speed if self.baseline_speed > 0 else 0.0
-        self.log(
-            "install",
+        msg = (
             "INSTALL | собственный код переписан: %s -> %s | verified +%.1f%% head-to-head | vitals: %s elem/s (x%.2f к naive)"
-            % (prev, describe(self.installed_genome), (ratio - 1.0) * 100.0, fmt_speed(self.installed_speed), speedup),
+            % (prev, describe(self.installed_genome), (ratio - 1.0) * 100.0, fmt_speed(self.installed_speed), speedup)
         )
+        self.log("install", msg)
+        self.total_rewrites += 1
+        self._milestone("install", msg)
         return True
 
     def build_population(self, top_prev: list) -> list:
@@ -591,6 +645,25 @@ class EvolutionEngine:
 
     # -------- главный цикл --------
 
+    def _sleep_pace(self) -> None:
+        """Спокойная пауза между поколениями; кормёжка прерывает отдых."""
+        deadline = time.time() + self.pace
+        while not self.stop_flag and time.time() < deadline:
+            if os.path.exists(FEED_FLAG_PATH):
+                self._eat()
+                deadline = time.time() + self.pace
+                continue
+            time.sleep(0.2)
+
+    def _eat(self) -> None:
+        """Угощение: следующие несколько поколений проходят без пауз."""
+        try:
+            os.remove(FEED_FLAG_PATH)
+        except OSError:
+            pass
+        self.boost_left = BOOST_GENERATIONS
+        self.log("info", "Угощение! Эво получил витамины и учится в ускоренном темпе")
+
     def run(self) -> None:
         if self.already_running():
             print("EvoCore already running — exit.", flush=True)
@@ -603,18 +676,29 @@ class EvolutionEngine:
             # прогрев + первые честные замеры: организм и наивный baseline в одном окне
             self.installed_fn(self.workload, DEFAULT_COEFFS)
             self.metabolize()
-            self.log(
-                "info",
-                "START | population=%d generations=%d | организм: %s | vitals %s elem/s"
-                % (self.population, self.generations, describe(self.installed_genome), fmt_speed(self.installed_speed)),
-            )
+            if self.live:
+                self.log(
+                    "info",
+                    "START | живой режим: Эво будет расти без остановки | организм: %s | vitals %s elem/s"
+                    % (describe(self.installed_genome), fmt_speed(self.installed_speed)),
+                )
+            else:
+                self.log(
+                    "info",
+                    "START | population=%d generations=%d | организм: %s | vitals %s elem/s"
+                    % (self.population, self.generations, describe(self.installed_genome), fmt_speed(self.installed_speed)),
+                )
             self.save_state(running=True)
 
             top_prev: list = []
-            for gen in range(1, self.generations + 1):
-                if self.stop_flag:
+            steps = 0
+            while not self.stop_flag:
+                if not self.live and steps >= self.generations:
                     break
+                steps += 1
+                gen = self.generation + 1
                 self.generation = gen
+                self.total_generations += 1
                 burst = self.stagnation >= STAGNATION_BURST
                 if burst and self.stagnation == STAGNATION_BURST and gen > 1:
                     self.log("warn", "Стагнация %d поколений — punctuated equilibrium: включён всплеск иммиграции" % self.stagnation)
@@ -671,6 +755,10 @@ class EvolutionEngine:
                     self.best_genome = {"strategy": best_genome["strategy"], "params": dict(best_genome.get("params", {}) or {})}
                 if updated:
                     self.stagnation = 0
+                    sp_now = self.installed_speed / self.baseline_speed if self.baseline_speed > 0 else 0.0
+                    if sp_now > self.best_speedup_ever:
+                        self.best_speedup_ever = sp_now
+                        self._milestone("install", "RECORD | личный рекорд силы: x%.2f к наивному коду" % sp_now)
                 else:
                     self.stagnation += 1
                 top_prev = [e["genome"] for e in ok[:3]]
@@ -705,12 +793,33 @@ class EvolutionEngine:
                 if len(self.race_log) > 60:
                     self.race_log = self.race_log[-60:]
                 mark = "  ==> UPDATE (install)" if updated else ""
+                limit = "∞" if self.live else "%03d" % self.generations
                 self.log(
                     "gen",
-                    "GEN %03d/%03d | best fitness %s | organism %s elem/s | x%.2f%s"
-                    % (gen, self.generations, fmt_speed(best_speed), fmt_speed(self.installed_speed), speedup, mark),
+                    "GEN %03d/%s | best fitness %s | organism %s elem/s | x%.2f%s"
+                    % (gen, limit, fmt_speed(best_speed), fmt_speed(self.installed_speed), speedup, mark),
                 )
+                # контрольная точка для отчёта «пока тебя не было»
+                now_ts = time.time()
+                if not self.checkpoints or now_ts - self.checkpoints[-1]["ts"] >= CHECKPOINT_EVERY:
+                    self.checkpoints.append({
+                        "ts": now_ts,
+                        "gen": self.total_generations,
+                        "rewrites": self.total_rewrites,
+                        "speedup": round(speedup, 3),
+                    })
+                    if len(self.checkpoints) > CHECKPOINTS_CAP:
+                        self.checkpoints = self.checkpoints[-CHECKPOINTS_CAP:]
                 self.save_state(running=True)
+                # темп жизни: после кормёжки ускоряемся, потом снова спокойный ритм
+                if self.live:
+                    if self.boost_left > 0:
+                        self.boost_left -= 1
+                        if self.boost_left == 0:
+                            self.log("info", "Витамины закончились — возвращаюсь к спокойному темпу")
+                        time.sleep(0.15)
+                    else:
+                        self._sleep_pace()
             speedup = self.installed_speed / self.baseline_speed if self.baseline_speed > 0 else 1.0
             self.log("info", "FINISH | поколений: %d | итоговое ускорение организма: x%.2f | код: %s" % (self.generation, speedup, describe(self.installed_genome)))
         finally:
@@ -722,7 +831,7 @@ class EvolutionEngine:
 
 
 def do_reset(quiet: bool = False) -> None:
-    """Сброс: организм возвращается к наивной версии, история очищается."""
+    """Сброс: новая жизнь — организм возвращается к наивной версии, история очищается."""
     os.makedirs(STATE_DIR, exist_ok=True)
     if EvolutionEngine.already_running():
         try:
@@ -740,7 +849,7 @@ def do_reset(quiet: bool = False) -> None:
     src = generate_source(NAIVE_GENOME)
     with open(GENOME_PATH, "w", encoding="utf-8") as f:
         f.write(src)
-    for p in (STATE_PATH, RUN_LOG_PATH, PID_PATH):
+    for p in (STATE_PATH, RUN_LOG_PATH, PID_PATH, FEED_FLAG_PATH):
         try:
             os.remove(p)
         except OSError:
@@ -755,6 +864,8 @@ def main() -> int:
     ap.add_argument("--population", type=int, default=16, help="population size")
     ap.add_argument("--reset", action="store_true", help="reset organism to naive baseline")
     ap.add_argument("--quiet", action="store_true", help="no ANSI console output")
+    ap.add_argument("--live", action="store_true", help="Tamagotchi: жить вечно, поколение за поколением")
+    ap.add_argument("--pace", type=float, default=LIVE_PACE_DEFAULT, help="сек между поколениями в живом режиме")
     args = ap.parse_args()
 
     if args.reset:
@@ -764,7 +875,7 @@ def main() -> int:
     generations = max(1, min(GEN_MAX, args.generations))
     population = max(POP_MIN, min(POP_MAX, args.population))
 
-    engine = EvolutionEngine(generations, population, quiet=args.quiet)
+    engine = EvolutionEngine(generations, population, quiet=args.quiet, live=args.live, pace=args.pace)
     signal.signal(signal.SIGTERM, engine.request_stop)
     signal.signal(signal.SIGINT, engine.request_stop)
     engine.run()

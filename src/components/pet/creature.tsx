@@ -6,9 +6,10 @@ interface CreatureProps {
   speedup: number;
   running: boolean;
   excited?: boolean; // короткая вспышка радости (переписал код)
+  feeding?: boolean; // сейчас кушает витамины — растёт быстрее
 }
 
-export default function Creature({ speedup, running, excited }: CreatureProps) {
+export default function Creature({ speedup, running, excited, feeding }: CreatureProps) {
   const { level, index } = levelFor(speedup);
   const size = Math.round(190 * level.scale);
 
@@ -28,6 +29,18 @@ export default function Creature({ speedup, running, excited }: CreatureProps) {
             key={i}
             className="evo-rise pointer-events-none absolute bottom-4 select-none text-sm opacity-0"
             style={{ left: `${12 + i * 19}%`, animationDelay: `${i * 0.9}s` }}
+          >
+            {p}
+          </span>
+        ))}
+
+      {/* сердечки и витамины при кормёжке */}
+      {feeding &&
+        ["💖", "🍎", "💖", "✨", "💖"].map((p, i) => (
+          <span
+            key={`f${i}`}
+            className="evo-rise pointer-events-none absolute bottom-4 select-none text-base opacity-0"
+            style={{ left: `${8 + i * 21}%`, animationDelay: `${i * 0.45}s`, animationDuration: "2.4s" }}
           >
             {p}
           </span>
@@ -97,7 +110,13 @@ export default function Creature({ speedup, running, excited }: CreatureProps) {
           <circle cx="134" cy="118" r="10" fill="url(#evo-cheek)" />
 
           {/* улыбка */}
-          {running ? (
+          {feeding ? (
+            <g>
+              {/* открытый от счастья рот */}
+              <ellipse cx="100" cy="130" rx="11" ry="8" fill="#064e3b" />
+              <ellipse cx="100" cy="133" rx="6" ry="3.5" fill="#fb7185" opacity="0.85" />
+            </g>
+          ) : running ? (
             <path d="M86 126 Q 100 140 114 126" stroke="#064e3b" strokeWidth="4" fill="none" strokeLinecap="round" />
           ) : (
             <path d="M88 126 Q 100 135 112 126" stroke="#064e3b" strokeWidth="4" fill="none" strokeLinecap="round" />

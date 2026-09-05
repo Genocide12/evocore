@@ -8,11 +8,30 @@ export const STATE_DIR = path.join(EVOLUTION_DIR, "state");
 export const STATE_PATH = path.join(STATE_DIR, "state.json");
 export const PID_PATH = path.join(STATE_DIR, "evolution.pid");
 export const GENOME_PATH = path.join(EVOLUTION_DIR, "genome_core.py");
+export const FEED_FLAG_PATH = path.join(STATE_DIR, "feed.flag");
+
+export const LIVE_POPULATION = 16;
 
 export interface EvolutionEvent {
   time: string;
+  ts?: number; // unix-время события (для отчёта «пока тебя не было»)
   type: "gen" | "install" | "info" | "warn" | "error";
   msg: string;
+}
+
+export interface Checkpoint {
+  ts: number;
+  gen: number;
+  rewrites: number;
+  speedup: number;
+}
+
+/** Отчёт «пока тебя не было»: что Эво успел, пока сайт был закрыт. */
+export interface AwayReport {
+  awayMs: number;
+  gens: number;
+  rewrites: number;
+  highlights: EvolutionEvent[];
 }
 
 export interface HistoryPoint {
@@ -28,7 +47,7 @@ export interface HistoryPoint {
 export interface EvolutionState {
   running: boolean;
   generation: number;
-  max_generations: number;
+  max_generations: number; // 0 = ∞ (живой режим)
   population: number;
   installed_genome: { strategy: string; params: Record<string, unknown> };
   installed_code: string;
@@ -42,6 +61,14 @@ export interface EvolutionState {
   events: EvolutionEvent[];
   started_at: string;
   updated_at: string;
+  // жизнь тамагочи (копится всю жизнь организма, переживает рестарты движка)
+  live?: boolean;
+  born_at?: string;
+  total_generations?: number;
+  total_rewrites?: number;
+  best_speedup_ever?: number;
+  milestones?: EvolutionEvent[];
+  checkpoints?: Checkpoint[];
 }
 
 export function isEngineRunning(): boolean {
@@ -116,6 +143,46 @@ export function stopEngine(): { ok: boolean; error?: string } {
     return { ok: true };
   } catch {
     return { ok: true };
+  }
+}
+
+/** Запустить Эво в живом режиме (Tamagotchi): вечная жизнь без остановки. */
+export function startLiveEngine(): { ok: boolean; error?: string } {
+  if (isEngineRunning()) return { ok: true }; // уже жив
+  if (!fs.existsSync(ENGINE_PATH)) {
+    return { ok: false, error: "Движок не найден / Engine not found" };
+  }
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const logFd = fs.openSync(path.join(STATE_DIR, "run.log"), "a");
+    const child = spawn(
+      "python3",
+      [ENGINE_PATH, "--live", "--population", String(LIVE_POPULATION), "--quiet"],
+      {
+        cwd: EVOLUTION_DIR,
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+      }
+    );
+    child.unref();
+    if (!child.pid) {
+      return { ok: false, error: "Не удалось запустить процесс / Failed to spawn process" };
+    }
+    fs.writeFileSync(PID_PATH, String(child.pid));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: `Spawn error: ${String(e)}` };
+  }
+}
+
+/** Покормить Эво: следующие поколения пройдут в ускоренном темпе. */
+export function feedPet(): { ok: boolean; error?: string } {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(FEED_FLAG_PATH, String(Date.now()));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
   }
 }
 
