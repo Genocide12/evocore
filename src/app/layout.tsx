@@ -14,10 +14,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "EvoCore ARENA — гонки саморазвивающихся мутантов",
+  title: "Эво — существо, которое пишет свой код",
   description:
-    "Азартная арена эволюции: мутанты соревнуются реальной скоростью своего кода, чемпионы перезаписывают геном программы. Ставки на семейства, уровни организма, живые гонки. A genetic algorithm arena where code races and rewrites itself.",
-  keywords: ["evolution", "genetic algorithm", "self-modifying code", "arena", "эволюция", "арена", "саморазвитие"],
+    "Нажми одну кнопку — и Эво начнёт сам переписывать свой код, становиться быстрее и расти. Настоящий генетический алгоритм, понятный даже ребёнку. A self-evolving program that writes and improves its own code, live.",
+  keywords: ["self-evolving", "genetic algorithm", "self-modifying code", "эволюция", "саморазвитие", "эво"],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },

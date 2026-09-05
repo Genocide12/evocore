@@ -2,7 +2,7 @@
   "name": "evocore",
   "version": "1.0.0",
   "private": true,
-  "description": "EvoCore — self-evolving program: genetic algorithm that rewrites its own code, with a live Next.js dashboard / саморазвивающаяся программа с живым дашбордом",
+  "description": "Эво — живое существо из кода: нажми кнопку и смотри, как программа сама себя переписывает и растёт. EvoCore — self-evolving program with a child-simple live dashboard",
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
@@ -54,8 +54,6 @@
     "react-dom": "^19.0.0",
     "react-hook-form": "^7.60.0",
     "react-resizable-panels": "^3.0.3",
-    "react-syntax-highlighter": "^15.6.1",
-    "recharts": "^2.15.4",
     "sharp": "^0.34.3",
     "sonner": "^2.0.6",
     "tailwind-merge": "^3.3.1",
